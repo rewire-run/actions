@@ -1,0 +1,72 @@
+name: setup rust
+description: Install a Rust toolchain, authenticate private git dependencies, and restore the cargo cache.
+
+inputs:
+  toolchain:
+    description: Toolchain to install, e.g. `stable`, `nightly`, or a version like `1.85.0`.
+    required: false
+    default: stable
+  components:
+    description: Comma-separated rustup components, e.g. `rustfmt`, `clippy`.
+    required: false
+    default: ""
+  targets:
+    description: Comma-separated target triples, e.g. `wasm32-unknown-unknown`.
+    required: false
+    default: ""
+  cache:
+    description: Restore and save the cargo cache with `Swatinem/rust-cache`.
+    required: false
+    default: "true"
+  cache-key:
+    description: >-
+      Additional key to separate caches that would otherwise collide, such as a
+      matrix target.
+    required: false
+    default: ""
+  cache-workspaces:
+    description: >-
+      Workspace directories to cache, for repositories that check out into a
+      subdirectory rather than the workspace root.
+    required: false
+    default: ""
+  private-repositories:
+    description: >-
+      Private repositories in this organization that cargo must read, as a
+      comma- or newline-separated list of names without the owner prefix.
+      Leave empty when every dependency is public.
+    required: false
+    default: ""
+  app-id:
+    description: App ID of the GitHub App that mints the installation token. Required with `private-repositories`.
+    required: false
+    default: ""
+  private-key:
+    description: Private key of the GitHub App that mints the installation token. Required with `private-repositories`.
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - uses: dtolnay/rust-toolchain@master
+      with:
+        toolchain: ${{ inputs.toolchain }}
+        components: ${{ inputs.components }}
+        targets: ${{ inputs.targets }}
+
+    # Must sit between the toolchain and the cache: cargo needs credentials
+    # before anything resolves the dependency graph, and rust-cache hashes the
+    # lockfile, which it cannot do while private dependencies are unreachable.
+    - if: inputs.private-repositories != ''
+      uses: rewire-run/actions/cargo-private-deps@v1
+      with:
+        repositories: ${{ inputs.private-repositories }}
+        app-id: ${{ inputs.app-id }}
+        private-key: ${{ inputs.private-key }}
+
+    - if: inputs.cache == 'true'
+      uses: Swatinem/rust-cache@v2
+      with:
+        key: ${{ inputs.cache-key }}
+        workspaces: ${{ inputs.cache-workspaces }}
