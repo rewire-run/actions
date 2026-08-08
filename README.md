@@ -1,6 +1,33 @@
-# actions
+<h1 align="center">
+  <a href="https://rewire.run/">
+    <img alt="banner" src="https://github.com/user-attachments/assets/4859413d-89b2-424c-a378-8a15260de384">
+  </a>
+</h1>
+
+<p align="center">
+  <a href="https://github.com/rewire-run/actions/actions/workflows/ci.yaml">
+    <img alt="CI" src="https://github.com/rewire-run/actions/actions/workflows/ci.yaml/badge.svg">
+  </a>
+  <a href="https://github.com/rewire-run/actions/tags">
+    <img alt="Version" src="https://img.shields.io/badge/version-v1.0.0-green">
+  </a>
+  <a href="https://github.com/rewire-run/actions/blob/main/LICENSE">
+    <img alt="License" src="https://img.shields.io/badge/license-Apache--2.0-blue">
+  </a>
+  <a href="https://pixi.sh">
+    <img alt="Powered by" src="https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/prefix-dev/pixi/main/assets/badge/v0.json">
+  </a>
+</p>
+
+# GitHub Actions for [rewire.run](https://rewire.run)
 
 Shared composite actions for Rewire CI workflows.
+
+## Actions
+
+| Action                                      | Description                                                      |
+| ------------------------------------------- | ---------------------------------------------------------------- |
+| [`cargo-private-deps`](#cargo-private-deps) | Let cargo fetch git dependencies from private repos in this org. |
 
 ## `cargo-private-deps`
 
@@ -38,13 +65,17 @@ Pass several repositories as a comma- or newline-separated list:
 
 ### Inputs
 
-| Input         | Required | Description                                                              |
-| ------------- | -------- | ------------------------------------------------------------------------ |
-| `repositories`| yes      | Private repos in this org that cargo must read, without the owner prefix. |
-| `app-id`      | yes      | App ID of the Rewire CI GitHub App.                                      |
-| `private-key` | yes      | Private key of the Rewire CI GitHub App.                                 |
+| Input          | Required | Description                                                               |
+| -------------- | -------- | ------------------------------------------------------------------------- |
+| `repositories` | yes      | Private repos in this org that cargo must read, without the owner prefix. |
+| `app-id`       | yes      | App ID of the Rewire CI GitHub App.                                       |
+| `private-key`  | yes      | Private key (PEM) of the Rewire CI GitHub App.                            |
 
 The organization is always the one running the workflow (`github.repository_owner`), so it is not an input.
+
+### Outputs
+
+None.
 
 ### What it does
 
@@ -65,10 +96,28 @@ Already configured for this organization, listed for whoever has to reproduce or
 3. Org secrets `APP_ID` and `APP_PRIVATE_KEY` hold its App ID and full PEM private key, and are available to the
    consuming repositories.
 
+### Troubleshooting
+
 A missing installation shows up as `404` on `/repos/<org>/<repo>/installation` rather than an auth error —
 the App's credentials are fine, there is just no installation to mint a token from.
+
+## Development
+
+Checks run through [pixi](https://pixi.sh):
+
+```bash
+pixi run sanity   # actionlint + schema — run before every commit
+pixi run lint     # actionlint over the workflows
+pixi run schema   # validate every action.yml against the GitHub Action schema
+```
+
+CI runs the same two checks on every push and PR — see [`.github/workflows/ci.yaml`](.github/workflows/ci.yaml).
 
 ## Versioning
 
 Reference the major tag, `@v1`. It moves forward across compatible changes; releases are also tagged with the
 full `vX.Y.Z`. Avoid `@main` in release pipelines — it changes under you the moment this repo is pushed.
+
+## License
+
+Licensed under the Apache License, Version 2.0. See [LICENSE](LICENSE) for details.
