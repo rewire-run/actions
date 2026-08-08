@@ -30,6 +30,8 @@ Shared composite actions for Rewire CI workflows.
 | [`cargo-private-deps`](#cargo-private-deps) | Let cargo fetch git dependencies from private repos in this org. |
 | [`setup-bun`](#setup-bun)                   | Install the pinned Bun toolchain and restore dependencies.       |
 | [`setup-rust`](#setup-rust)                 | Install Rust, authenticate private deps, and restore the cache.  |
+| [`r2-upload`](#r2-upload)                   | Upload files to a Cloudflare R2 bucket with a pinned wrangler.   |
+| [`github-release`](#github-release)         | Generate a changelog and publish a release with its artifacts.   |
 
 ## `cargo-private-deps`
 
@@ -261,6 +263,149 @@ a pair by temporarily pointing the internal reference at the branch, or land the
 GitHub's `$/` self-repository syntax is the eventual fix here — it resolves to the containing repository at the
 running commit with no hardcoded ref — but its behavior inside a composite action consumed from another
 repository is not documented, and it is unavailable on GitHub Enterprise Server. Revisit once that is settled.
+
+## `r2-upload`
+
+Uploads files to a Cloudflare R2 bucket.
+
+Every release pipeline ends by pushing artifacts to R2, and each one had grown its own copy of
+`npm install -g wrangler` followed by a `wrangler r2 object put` loop. None of them pinned wrangler, so every
+release picked up whatever version npm served that day — including across majors.
+
+### Usage
+
+Release artifacts, keyed by basename:
+
+```yaml
+- uses: rewire-run/actions/r2-upload@v1
+  with:
+    bucket: rewire-releases
+    files: |
+      version.txt
+      artifacts/*.tar.gz
+    api-token: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+    account-id: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+```
+
+A directory tree that must keep its structure, such as an APT repository — note `flatten: "false"` and the
+`working-directory` that the keys are relative to:
+
+```yaml
+- uses: rewire-run/actions/r2-upload@v1
+  with:
+    bucket: rewire-apt
+    working-directory: repo
+    files: pool/main/*.deb
+    flatten: "false"
+    cache-control: max-age=31536000
+    api-token: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+    account-id: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+```
+
+Each call applies one `content-type` and one `cache-control` to everything it uploads, so a tree with several
+classes of file — immutable packages, no-cache metadata — is several calls rather than one.
+
+### Inputs
+
+| Input               | Required | Default | Description                                                       |
+| ------------------- | -------- | ------- | ----------------------------------------------------------------- |
+| `bucket`            | yes      | —       | R2 bucket to upload into.                                          |
+| `files`             | yes      | —       | Newline- or space-separated paths and globs. Fails if none match.  |
+| `prefix`            | no       | —       | Key prefix, used verbatim — include the trailing slash.            |
+| `content-type`      | no       | —       | Applied to every file in this call; inferred when empty.           |
+| `cache-control`     | no       | —       | Applied to every file in this call.                                |
+| `flatten`           | no       | `true`  | Key by basename; `false` keeps the path relative to the workdir.   |
+| `working-directory` | no       | `.`     | Directory that `files` resolves from.                              |
+| `wrangler-version`  | no       | `4`     | wrangler version to install.                                       |
+| `api-token`         | yes      | —       | Cloudflare API token with write access.                            |
+| `account-id`        | yes      | —       | Cloudflare account ID owning the bucket.                           |
+
+### Outputs
+
+None.
+
+### What it does
+
+- Installs `wrangler@<wrangler-version>` — a pinned major by default, rather than whatever npm serves.
+- Expands `files` relative to `working-directory` and uploads each match with `wrangler r2 object put --remote`.
+- Sets `--content-type` from the caller's value, or infers it from the extension: `.wasm`, `.js`/`.mjs`,
+  `.html`, `.css`, `.json`, `.gz`/`.tgz`, `.deb`, `.asc`/`.gpg`, `.txt`/`.sh`. Anything unrecognized is uploaded
+  without the flag so wrangler applies its own default instead of a wrong guess.
+- Sets `--cache-control` when given.
+
+### Failure modes it makes loud
+
+An upload step that quietly uploads nothing still reports success, and the broken release is only discovered by a
+user. So this action fails when a glob matches nothing, and fails when a literal path does not exist. Directories
+matched by a glob are skipped rather than treated as errors.
+
+## `github-release`
+
+Generates a changelog with git-cliff and publishes a GitHub release with the run's artifacts.
+
+### Usage
+
+```yaml
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: rewire-run/actions/github-release@v1
+        with:
+          files: artifacts/*
+```
+
+A notes-only release, for a repository that builds no artifacts:
+
+```yaml
+      - uses: rewire-run/actions/github-release@v1
+        with:
+          download-artifacts: "false"
+```
+
+A release candidate:
+
+```yaml
+      - uses: rewire-run/actions/github-release@v1
+        with:
+          files: artifacts/*
+          prerelease: "true"
+```
+
+### Inputs
+
+| Input                | Required | Default          | Description                                            |
+| -------------------- | -------- | ---------------- | ------------------------------------------------------ |
+| `files`              | no       | —                | Assets to attach. Empty means a notes-only release.    |
+| `name`               | no       | `github.ref_name`| Release title.                                          |
+| `prerelease`         | no       | `false`          | Mark as a pre-release.                                  |
+| `changelog-config`   | no       | `cliff.toml`     | git-cliff configuration path.                           |
+| `checkout`           | no       | `true`           | Check out at full depth before generating the changelog.|
+| `download-artifacts` | no       | `true`           | Download and merge the run's artifacts first.           |
+| `artifact-path`      | no       | `artifacts`      | Directory artifacts are downloaded into.                |
+
+### Outputs
+
+None.
+
+### What it does
+
+- Checks out at `fetch-depth: 0`. This is not optional for a changelog: git-cliff walks history, and a shallow
+  clone yields an empty changelog rather than an error.
+- Downloads every artifact from the run with `merge-multiple: true` into `artifact-path`.
+- Runs git-cliff with `--latest --strip header`.
+- Publishes with `softprops/action-gh-release`, using the changelog as the body and `generate_release_notes:
+  false` so GitHub's autogenerated notes do not compete with git-cliff's.
+
+The calling job needs `permissions: contents: write`.
+
+### Note on `download-artifacts`
+
+`actions/download-artifact` fails when the run produced no artifacts, so a repository that publishes notes only
+must set `download-artifacts: "false"`. The default is `true` because most release pipelines here do build
+something.
 
 ## Development
 

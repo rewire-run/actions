@@ -1,0 +1,71 @@
+name: github release
+description: Generate a changelog with git-cliff and publish a GitHub release with its artifacts.
+
+inputs:
+  files:
+    description: >-
+      Assets to attach, as a glob or newline-separated list. Leave empty for a
+      notes-only release.
+    required: false
+    default: ""
+  name:
+    description: Release title. Defaults to the tag that triggered the workflow.
+    required: false
+    default: ""
+  prerelease:
+    description: Mark the release as a pre-release.
+    required: false
+    default: "false"
+  changelog-config:
+    description: Path to the git-cliff configuration.
+    required: false
+    default: cliff.toml
+  checkout:
+    description: >-
+      Check the repository out at full depth. git-cliff needs the whole history
+      to build a changelog, so leave this on unless the job already did it.
+    required: false
+    default: "true"
+  download-artifacts:
+    description: >-
+      Download and merge every artifact from the run before releasing. Set to
+      `false` for a release that builds nothing, since the download fails when
+      the run produced no artifacts.
+    required: false
+    default: "true"
+  artifact-path:
+    description: Directory that artifacts are downloaded into.
+    required: false
+    default: artifacts
+
+runs:
+  using: composite
+  steps:
+    # Full history first: a shallow clone gives git-cliff nothing to walk, and
+    # the changelog silently comes out empty rather than failing.
+    - if: inputs.checkout == 'true'
+      uses: actions/checkout@v7
+      with:
+        fetch-depth: 0
+
+    - if: inputs.download-artifacts == 'true'
+      uses: actions/download-artifact@v8
+      with:
+        path: ${{ inputs.artifact-path }}
+        merge-multiple: true
+
+    - uses: orhun/git-cliff-action@v4
+      id: changelog
+      with:
+        config: ${{ inputs.changelog-config }}
+        args: --latest --strip header
+      env:
+        GITHUB_TOKEN: ${{ github.token }}
+
+    - uses: softprops/action-gh-release@v3
+      with:
+        name: ${{ inputs.name || github.ref_name }}
+        body: ${{ steps.changelog.outputs.content }}
+        files: ${{ inputs.files }}
+        prerelease: ${{ inputs.prerelease }}
+        generate_release_notes: false
