@@ -14,6 +14,9 @@
   <a href="https://github.com/rewire-run/actions/blob/main/LICENSE">
     <img alt="License" src="https://img.shields.io/badge/license-Apache--2.0-blue">
   </a>
+  <a href="https://pixi.sh">
+    <img alt="Powered by" src="https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/prefix-dev/pixi/main/assets/badge/v0.json">
+  </a>
 </p>
 
 # GitHub Actions for [rewire.run](https://rewire.run)
@@ -97,6 +100,18 @@ Already configured for this organization, listed for whoever has to reproduce or
 
 A missing installation shows up as `404` on `/repos/<org>/<repo>/installation` rather than an auth error —
 the App's credentials are fine, there is just no installation to mint a token from.
+
+## Development
+
+Checks run through [pixi](https://pixi.sh):
+
+```bash
+pixi run sanity   # actionlint + schema — run before every commit
+pixi run lint     # actionlint over the workflows
+pixi run schema   # validate every action.yml against the GitHub Action schema
+```
+
+CI runs the same two checks on every push and PR — see [`.github/workflows/ci.yaml`](.github/workflows/ci.yaml).
 
 ## Versioning
 
