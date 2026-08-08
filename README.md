@@ -28,6 +28,7 @@ Shared composite actions for Rewire CI workflows.
 | Action                                      | Description                                                      |
 | ------------------------------------------- | ---------------------------------------------------------------- |
 | [`cargo-private-deps`](#cargo-private-deps) | Let cargo fetch git dependencies from private repos in this org. |
+| [`setup-bun`](#setup-bun)                   | Install the pinned Bun toolchain and restore dependencies.       |
 
 ## `cargo-private-deps`
 
@@ -100,6 +101,65 @@ Already configured for this organization, listed for whoever has to reproduce or
 
 A missing installation shows up as `404` on `/repos/<org>/<repo>/installation` rather than an auth error —
 the App's credentials are fine, there is just no installation to mint a token from.
+
+## `setup-bun`
+
+Installs the organization's pinned Bun toolchain and restores dependencies from the lockfile.
+
+Every job in every JavaScript repository begins with the same two steps — install Bun, then
+`bun install --frozen-lockfile`. Keeping the version pin here means an upgrade is one edit rather than one per
+job, and it stops repositories from silently floating on `bun-version: latest`, where an upstream release can
+break CI with no change on our side.
+
+### Usage
+
+```yaml
+steps:
+  - uses: actions/checkout@v6
+  - uses: rewire-run/actions/setup-bun@v1
+  - run: bun run build
+```
+
+In a monorepo, install from the directory that owns the lockfile:
+
+```yaml
+    with:
+      working-directory: apps/api
+```
+
+Skip the install when a job only needs the runtime — a lint pass over a directory, say, with nothing to resolve:
+
+```yaml
+    with:
+      install: "false"
+```
+
+### Inputs
+
+| Input               | Required | Default | Description                                                         |
+| ------------------- | -------- | ------- | ------------------------------------------------------------------- |
+| `bun-version`       | no       | `1.3.5` | Bun version to install. Leave unset — this is the org pin.          |
+| `install`           | no       | `true`  | Run `bun install --frozen-lockfile`.                                |
+| `working-directory` | no       | `.`     | Directory containing the lockfile that dependencies install from.   |
+
+### Outputs
+
+None.
+
+### What it does
+
+- Installs Bun via `oven-sh/setup-bun@v2` at the pinned version.
+- Runs `bun install --frozen-lockfile` in `working-directory`, unless `install` is `false`.
+
+`--frozen-lockfile` is not optional: it fails the job when `bun.lock` disagrees with `package.json` rather than
+silently resolving something the lockfile never recorded. CI should never be the place a lockfile changes.
+
+### Upgrading Bun
+
+Change the `bun-version` default in [`setup-bun/action.yml`](setup-bun/action.yml), then move the `v1` tag. Every
+consumer picks it up on its next run, so verify against one repository from a branch ref first — see
+[Versioning](#versioning). Keep the pin in step with the `packageManager` field that consuming repositories
+declare in their `package.json`; a mismatch means CI and local development resolve differently.
 
 ## Development
 
