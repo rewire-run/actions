@@ -13,5 +13,10 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: raven-actions/actionlint@v2
-        with:
-          files: "*/action.yml"
+
+  schema:
+    name: action schema
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - run: pipx run check-jsonschema --builtin-schema vendor.github-actions */action.yml
