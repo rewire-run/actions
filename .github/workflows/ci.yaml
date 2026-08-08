@@ -19,4 +19,4 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-      - run: pipx run check-jsonschema --builtin-schema vendor.github-actions */action.yml
+      - run: pipx run check-jsonschema --builtin-schema vendor.github-actions ./*/action.yml
