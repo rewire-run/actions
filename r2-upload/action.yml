@@ -1,0 +1,138 @@
+name: r2 upload
+description: Upload files to a Cloudflare R2 bucket with a pinned wrangler.
+
+inputs:
+  bucket:
+    description: R2 bucket to upload into, e.g. `rewire-releases`.
+    required: true
+  files:
+    description: >-
+      Files to upload, as a newline- or space-separated list of paths or globs,
+      resolved relative to `working-directory`. Fails when nothing matches.
+    required: true
+  prefix:
+    description: >-
+      Key prefix inside the bucket, used verbatim — include a trailing slash if
+      you want one.
+    required: false
+    default: ""
+  content-type:
+    description: >-
+      Content type applied to every file in this call. Inferred from the file
+      extension when empty.
+    required: false
+    default: ""
+  cache-control:
+    description: Cache-Control header applied to every file in this call.
+    required: false
+    default: ""
+  flatten:
+    description: >-
+      Key each object by its basename. Set to `false` to keep the path relative
+      to `working-directory`, which is what a directory tree such as an APT
+      repository needs.
+    required: false
+    default: "true"
+  working-directory:
+    description: Directory that `files` is resolved from.
+    required: false
+    default: .
+  wrangler-version:
+    description: wrangler version to install. Defaults to the pinned major.
+    required: false
+    default: "4"
+  api-token:
+    description: Cloudflare API token with write access to the bucket.
+    required: true
+  account-id:
+    description: Cloudflare account ID that owns the bucket.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Install wrangler
+      shell: bash
+      env:
+        WRANGLER_VERSION: ${{ inputs.wrangler-version }}
+      run: npm install -g "wrangler@${WRANGLER_VERSION}"
+
+    - name: Upload to R2
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        BUCKET: ${{ inputs.bucket }}
+        FILES: ${{ inputs.files }}
+        PREFIX: ${{ inputs.prefix }}
+        CONTENT_TYPE: ${{ inputs.content-type }}
+        CACHE_CONTROL: ${{ inputs.cache-control }}
+        FLATTEN: ${{ inputs.flatten }}
+        CLOUDFLARE_API_TOKEN: ${{ inputs.api-token }}
+        CLOUDFLARE_ACCOUNT_ID: ${{ inputs.account-id }}
+      run: |
+        set -euo pipefail
+        shopt -s nullglob
+
+        # Content type by extension, used only when the caller did not pin one.
+        # Anything unrecognized is uploaded without the flag so wrangler applies
+        # its own default rather than a wrong guess.
+        infer_type() {
+          case "$1" in
+            *.wasm) echo "application/wasm" ;;
+            *.js | *.mjs) echo "application/javascript" ;;
+            *.html) echo "text/html" ;;
+            *.css) echo "text/css" ;;
+            *.json) echo "application/json" ;;
+            *.gz | *.tgz) echo "application/gzip" ;;
+            *.deb) echo "application/vnd.debian.binary-package" ;;
+            *.asc | *.gpg) echo "application/pgp-keys" ;;
+            *.txt | *.sh) echo "text/plain" ;;
+            *) echo "" ;;
+          esac
+        }
+
+        # Unquoted on purpose: splits the list on whitespace, including
+        # newlines, and expands each entry as a glob. nullglob drops patterns
+        # that match nothing, which the emptiness check below then catches.
+        # shellcheck disable=SC2206
+        matched=(${FILES})
+
+        if [ ${#matched[@]} -eq 0 ]; then
+          echo "::error::No files matched: ${FILES}"
+          exit 1
+        fi
+
+        for file in "${matched[@]}"; do
+          # A glob can match directories; skip those rather than fail. A literal
+          # path that does not exist is a caller mistake and must not pass
+          # silently — a release that uploads nothing still reports success.
+          if [ -d "${file}" ]; then
+            continue
+          fi
+          if [ ! -f "${file}" ]; then
+            echo "::error::File not found: ${file}"
+            exit 1
+          fi
+
+          if [ "${FLATTEN}" = "true" ]; then
+            key="$(basename "${file}")"
+          else
+            key="${file#./}"
+          fi
+
+          type="${CONTENT_TYPE}"
+          if [ -z "${type}" ]; then
+            type="$(infer_type "${file}")"
+          fi
+
+          args=(r2 object put "${BUCKET}/${PREFIX}${key}" --file "${file}" --remote)
+          if [ -n "${type}" ]; then
+            args+=(--content-type "${type}")
+          fi
+          if [ -n "${CACHE_CONTROL}" ]; then
+            args+=(--cache-control "${CACHE_CONTROL}")
+          fi
+
+          echo "uploading ${file} -> ${BUCKET}/${PREFIX}${key}"
+          wrangler "${args[@]}"
+        done
