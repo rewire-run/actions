@@ -1,0 +1,37 @@
+name: cargo private deps
+description: Authenticate cargo git fetches against private repositories in this organization.
+
+inputs:
+  repositories:
+    description: >-
+      Private repositories in this organization that cargo needs to read, as a
+      comma- or newline-separated list of names without the owner prefix.
+    required: true
+  app-id:
+    description: App ID of the GitHub App that mints the installation token.
+    required: true
+  private-key:
+    description: Private key of the GitHub App that mints the installation token.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/create-github-app-token@v2
+      id: token
+      with:
+        app-id: ${{ inputs.app-id }}
+        private-key: ${{ inputs.private-key }}
+        owner: ${{ github.repository_owner }}
+        repositories: ${{ inputs.repositories }}
+
+    - name: Rewrite org git URLs to use the app token
+      shell: bash
+      env:
+        TOKEN: ${{ steps.token.outputs.token }}
+        OWNER: ${{ github.repository_owner }}
+      run: |
+        git config --global \
+          "url.https://x-access-token:${TOKEN}@github.com/${OWNER}.insteadOf" \
+          "https://github.com/${OWNER}"
+        echo "CARGO_NET_GIT_FETCH_WITH_CLI=true" >> "$GITHUB_ENV"
