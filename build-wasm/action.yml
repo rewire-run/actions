@@ -1,0 +1,101 @@
+name: build wasm
+description: Build a crate for wasm32, generate JS bindings, and optionally optimize the module.
+
+inputs:
+  crate-name:
+    description: Crate name with underscores, as it appears in the built artifact, e.g. `rewire_viewer`.
+    required: true
+  profile:
+    description: Cargo profile to build, `debug` or `release`.
+    required: false
+    default: debug
+  cargo-args:
+    description: Extra arguments passed to `cargo build`, e.g. `--no-default-features`.
+    required: false
+    default: --no-default-features
+  out-dir:
+    description: Directory wasm-bindgen writes the JS bindings and module into.
+    required: false
+    default: web/
+  optimize:
+    description: Run `wasm-opt -Oz` over the generated module. Installs binaryen when enabled.
+    required: false
+    default: "false"
+  wasm-bindgen-version:
+    description: >-
+      wasm-bindgen-cli version. Must match the crate's `wasm-bindgen` dependency
+      or the generated bindings fail at runtime.
+    required: false
+    default: 0.2.117
+  binaryen-version:
+    description: binaryen release to install when `optimize` is enabled.
+    required: false
+    default: version_130
+  working-directory:
+    description: Directory containing the crate.
+    required: false
+    default: .
+
+runs:
+  using: composite
+  steps:
+    - name: Install wasm-bindgen
+      uses: taiki-e/install-action@v2
+      with:
+        tool: wasm-bindgen-cli@${{ inputs.wasm-bindgen-version }}
+
+    # clang and llvm-ar back the AR_/CC_ variables the wasm32 build needs.
+    - name: Install LLVM tools
+      shell: bash
+      run: sudo apt-get update && sudo apt-get install -y llvm clang
+
+    - name: Install binaryen
+      if: inputs.optimize == 'true'
+      shell: bash
+      env:
+        BINARYEN_VERSION: ${{ inputs.binaryen-version }}
+      run: |
+        set -euo pipefail
+        curl -sSL "https://github.com/WebAssembly/binaryen/releases/download/${BINARYEN_VERSION}/binaryen-${BINARYEN_VERSION}-x86_64-linux.tar.gz" | tar xz
+        echo "${PWD}/binaryen-${BINARYEN_VERSION}/bin" >> "$GITHUB_PATH"
+
+    - name: Build WASM
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        AR_wasm32_unknown_unknown: llvm-ar
+        CC_wasm32_unknown_unknown: clang
+        PROFILE: ${{ inputs.profile }}
+        CARGO_ARGS: ${{ inputs.cargo-args }}
+      run: |
+        set -euo pipefail
+        release_flag=""
+        if [ "${PROFILE}" = "release" ]; then
+          release_flag="--release"
+        fi
+        # shellcheck disable=SC2086
+        cargo build --lib --target wasm32-unknown-unknown ${release_flag} ${CARGO_ARGS}
+
+    - name: Generate JS bindings
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        CRATE_NAME: ${{ inputs.crate-name }}
+        PROFILE: ${{ inputs.profile }}
+        OUT_DIR: ${{ inputs.out-dir }}
+      run: |
+        set -euo pipefail
+        wasm-bindgen "target/wasm32-unknown-unknown/${PROFILE}/${CRATE_NAME}.wasm" \
+          --target web --out-dir "${OUT_DIR}"
+
+    - name: Optimize WASM
+      if: inputs.optimize == 'true'
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        CRATE_NAME: ${{ inputs.crate-name }}
+        OUT_DIR: ${{ inputs.out-dir }}
+      run: |
+        set -euo pipefail
+        module="${OUT_DIR%/}/${CRATE_NAME}_bg.wasm"
+        wasm-opt -Oz "${module}" -o "${module}"

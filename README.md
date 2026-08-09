@@ -32,6 +32,9 @@ Shared composite actions for Rewire CI workflows.
 | [`setup-rust`](#setup-rust)                 | Install Rust, authenticate private deps, and restore the cache.  |
 | [`r2-upload`](#r2-upload)                   | Upload files to a Cloudflare R2 bucket with a pinned wrangler.   |
 | [`github-release`](#github-release)         | Generate a changelog and publish a release with its artifacts.   |
+| [`cargo-build-artifact`](#cargo-build-artifact) | Build a release binary and package it as a tarball.          |
+| [`validate-tag`](#validate-tag)             | Fail unless the triggering tag matches the release format.       |
+| [`build-wasm`](#build-wasm)                 | Build for wasm32, generate JS bindings, optionally optimize.     |
 
 ## `cargo-private-deps`
 
@@ -406,6 +409,164 @@ The calling job needs `permissions: contents: write`.
 `actions/download-artifact` fails when the run produced no artifacts, so a repository that publishes notes only
 must set `download-artifacts: "false"`. The default is `true` because most release pipelines here do build
 something.
+
+## `cargo-build-artifact`
+
+Builds a release binary — natively or cross-compiled with `cargo-zigbuild` — and packages it as a tarball.
+
+### Usage
+
+Cross-compiled, bundling a binary downloaded from another repository's release:
+
+```yaml
+- uses: rewire-run/actions/cargo-build-artifact@v1
+  id: build
+  with:
+    archive-name: rewire
+    binaries: rewire
+    target: ${{ matrix.target }}
+    zigbuild: ${{ matrix.zigbuild }}
+    cargo-args: -p cli
+    extra-files: ../viewer-artifact/rewire-viewer
+    working-directory: rewire-bridge
+- uses: actions/upload-artifact@v7
+  with:
+    name: rewire-${{ matrix.target }}
+    path: rewire-bridge/${{ steps.build.outputs.archive }}
+```
+
+Built natively for the runner, with the platform named explicitly:
+
+```yaml
+- uses: rewire-run/actions/cargo-build-artifact@v1
+  with:
+    archive-name: iris
+    binaries: |
+      libiris.rlib
+      libiris.d
+    label: ${{ matrix.target }}
+    version: ${{ github.ref_name }}
+    cargo-args: --all-features
+```
+
+### Inputs
+
+| Input               | Required | Default            | Description                                                  |
+| ------------------- | -------- | ------------------ | ------------------------------------------------------------ |
+| `archive-name`      | yes      | —                  | Archive basename.                                            |
+| `binaries`          | yes      | —                  | Files taken from the release directory into the archive.     |
+| `target`            | no       | —                  | Triple to cross-compile for. Empty builds natively.          |
+| `label`             | no       | `target`           | Platform suffix in the archive name.                         |
+| `version`           | no       | tag without `v`    | Version in the archive name.                                 |
+| `zigbuild`          | no       | `false`            | Cross-compile with `cargo zigbuild`.                         |
+| `glibc`             | no       | `2.35`             | glibc version appended to the target for zigbuild.           |
+| `cargo-args`        | no       | —                  | Extra build arguments, e.g. `-p cli`, `--all-features`.      |
+| `extra-files`       | no       | —                  | Additional files staged alongside `binaries`.                |
+| `working-directory` | no       | `.`                | Directory containing the cargo workspace.                    |
+
+### Outputs
+
+| Output    | Description                                                    |
+| --------- | -------------------------------------------------------------- |
+| `archive` | Archive filename, relative to `working-directory`.             |
+
+`ARCHIVE` is also exported to `$GITHUB_ENV` for callers that already read it, but prefer the output.
+
+### What it does
+
+- Installs `cargo-zigbuild` and Zig when `zigbuild` is enabled.
+- Builds `--release`, appending `.<glibc>` to the target under zigbuild.
+- Stages `binaries` from `target/<triple>/release` — or `target/release` for a native build — plus any
+  `extra-files`, then tars the staging directory into `<archive-name>-<version>-<label>.tar.gz`.
+
+### Two things that fail loudly
+
+A missing binary or a missing `extra-files` entry fails the job. The pattern this replaces used
+`cp … 2>/dev/null || true` for the bundled viewer binary, so a failed download produced a release that shipped
+without it and still reported success. A native build with no `label` also fails rather than producing an archive
+named with an empty platform suffix.
+
+## `validate-tag`
+
+Fails the workflow unless the triggering tag matches the expected release format.
+
+### Usage
+
+```yaml
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: rewire-run/actions/validate-tag@v1
+        with:
+          kind: rc
+```
+
+### Inputs
+
+| Input     | Required | Default            | Description                                             |
+| --------- | -------- | ------------------ | ------------------------------------------------------- |
+| `kind`    | no       | `stable`           | `stable` for `vX.Y.Z`, `rc` for `vX.Y.ZrcN`.            |
+| `pattern` | no       | —                  | Explicit ERE, overriding `kind`.                        |
+| `tag`     | no       | `github.ref_name`  | Tag to validate.                                        |
+
+### Outputs
+
+None.
+
+### What it does
+
+Matches the tag against the pattern for `kind`, or against `pattern` when given, and exits non-zero with an
+`::error::` annotation on a mismatch. `stable` and `rc` are mutually exclusive by construction, so a release
+workflow gated on `stable` will not fire for a release candidate.
+
+## `build-wasm`
+
+Builds a crate for `wasm32-unknown-unknown`, generates JS bindings, and optionally optimizes the module.
+
+Install the toolchain first — this action assumes the `wasm32-unknown-unknown` target is already present:
+
+```yaml
+- uses: rewire-run/actions/setup-rust@v1
+  with:
+    targets: wasm32-unknown-unknown
+    cache-key: wasm32
+- uses: rewire-run/actions/build-wasm@v1
+  with:
+    crate-name: rewire_viewer
+    profile: release
+    optimize: "true"
+```
+
+### Inputs
+
+| Input                  | Required | Default                  | Description                                       |
+| ---------------------- | -------- | ------------------------ | ------------------------------------------------- |
+| `crate-name`           | yes      | —                        | Crate name with underscores, e.g. `rewire_viewer`.|
+| `profile`              | no       | `debug`                  | `debug` or `release`.                             |
+| `cargo-args`           | no       | `--no-default-features`  | Extra build arguments.                            |
+| `out-dir`              | no       | `web/`                   | wasm-bindgen output directory.                    |
+| `optimize`             | no       | `false`                  | Run `wasm-opt -Oz`; installs binaryen.            |
+| `wasm-bindgen-version` | no       | `0.2.117`                | wasm-bindgen-cli version.                         |
+| `binaryen-version`     | no       | `version_130`            | binaryen release used when optimizing.            |
+| `working-directory`    | no       | `.`                      | Directory containing the crate.                   |
+
+### Outputs
+
+None.
+
+### What it does
+
+- Installs `wasm-bindgen-cli` at the pinned version, plus `llvm` and `clang`, which back the
+  `AR_wasm32_unknown_unknown` and `CC_wasm32_unknown_unknown` variables the build needs.
+- Builds `--lib` for `wasm32-unknown-unknown`.
+- Runs `wasm-bindgen --target web` into `out-dir`.
+- When `optimize` is set, installs binaryen and rewrites the module in place with `wasm-opt -Oz`.
+
+### Keep the wasm-bindgen version in step
+
+`wasm-bindgen-version` must match the crate's `wasm-bindgen` dependency. A mismatch does not fail the build — it
+produces bindings that fail at runtime, which is why the pin lives here rather than being repeated per workflow.
 
 ## Development
 
