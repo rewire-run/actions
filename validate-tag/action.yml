@@ -1,0 +1,48 @@
+name: validate tag
+description: Fail the workflow unless the triggering tag matches the expected release format.
+
+inputs:
+  kind:
+    description: >-
+      Expected tag shape. `stable` matches `vX.Y.Z`, `rc` matches `vX.Y.ZrcN`.
+      Ignored when `pattern` is set.
+    required: false
+    default: stable
+  pattern:
+    description: Explicit ERE to match against, overriding `kind`.
+    required: false
+    default: ""
+  tag:
+    description: Tag to validate. Defaults to the ref that triggered the workflow.
+    required: false
+    default: ${{ github.ref_name }}
+
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        KIND: ${{ inputs.kind }}
+        PATTERN: ${{ inputs.pattern }}
+        TAG: ${{ inputs.tag }}
+      run: |
+        set -euo pipefail
+
+        pattern="${PATTERN}"
+        if [ -z "${pattern}" ]; then
+          case "${KIND}" in
+            stable) pattern='^v[0-9]+\.[0-9]+\.[0-9]+$' ;;
+            rc) pattern='^v[0-9]+\.[0-9]+\.[0-9]+rc[0-9]+$' ;;
+            *)
+              echo "::error::Unknown kind '${KIND}'; expected 'stable' or 'rc'"
+              exit 1
+              ;;
+          esac
+        fi
+
+        if [[ ! "${TAG}" =~ ${pattern} ]]; then
+          echo "::error::Tag '${TAG}' does not match ${pattern}"
+          exit 1
+        fi
+
+        echo "Tag '${TAG}' matches ${pattern}"

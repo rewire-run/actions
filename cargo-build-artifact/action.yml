@@ -1,0 +1,153 @@
+name: cargo build artifact
+description: Build a release binary, natively or cross-compiled with zigbuild, and package it as a tarball.
+
+inputs:
+  archive-name:
+    description: Archive basename, e.g. `rewire`, `rewire-viewer`, `iris`.
+    required: true
+  binaries:
+    description: >-
+      Space- or newline-separated files to take from the release directory and
+      stage into the archive.
+    required: true
+  target:
+    description: >-
+      Target triple to cross-compile for. Leave empty to build natively for the
+      runner, in which case artifacts come from `target/release`.
+    required: false
+    default: ""
+  label:
+    description: >-
+      Suffix identifying the platform in the archive name. Defaults to `target`;
+      set it explicitly for native builds, which have no target to name.
+    required: false
+    default: ""
+  version:
+    description: Version embedded in the archive name. Defaults to the tag without its leading `v`.
+    required: false
+    default: ""
+  zigbuild:
+    description: Cross-compile with `cargo zigbuild` instead of `cargo build`.
+    required: false
+    default: "false"
+  glibc:
+    description: glibc version appended to the target for zigbuild, e.g. `2.35`.
+    required: false
+    default: "2.35"
+  cargo-args:
+    description: Extra arguments passed to the build, e.g. `-p cli` or `--all-features`.
+    required: false
+    default: ""
+  extra-files:
+    description: >-
+      Additional files staged into the archive alongside `binaries`, given as
+      paths relative to `working-directory`.
+    required: false
+    default: ""
+  working-directory:
+    description: Directory containing the cargo workspace.
+    required: false
+    default: .
+
+outputs:
+  archive:
+    description: Filename of the archive produced, relative to `working-directory`.
+    value: ${{ steps.package.outputs.archive }}
+
+runs:
+  using: composite
+  steps:
+    - name: Install cargo-zigbuild
+      if: inputs.zigbuild == 'true'
+      uses: taiki-e/install-action@v2
+      with:
+        tool: cargo-zigbuild
+
+    - name: Install Zig
+      if: inputs.zigbuild == 'true'
+      uses: mlugg/setup-zig@v2
+
+    - name: Build
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        TARGET: ${{ inputs.target }}
+        ZIGBUILD: ${{ inputs.zigbuild }}
+        GLIBC: ${{ inputs.glibc }}
+        CARGO_ARGS: ${{ inputs.cargo-args }}
+      run: |
+        set -euo pipefail
+
+        if [ "${ZIGBUILD}" = "true" ]; then
+          if [ -z "${TARGET}" ]; then
+            echo "::error::zigbuild requires a target"
+            exit 1
+          fi
+          # shellcheck disable=SC2086
+          cargo zigbuild --release --target "${TARGET}.${GLIBC}" ${CARGO_ARGS}
+        elif [ -n "${TARGET}" ]; then
+          # shellcheck disable=SC2086
+          cargo build --release --target "${TARGET}" ${CARGO_ARGS}
+        else
+          # shellcheck disable=SC2086
+          cargo build --release ${CARGO_ARGS}
+        fi
+
+    - name: Package
+      id: package
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        ARCHIVE_NAME: ${{ inputs.archive-name }}
+        BINARIES: ${{ inputs.binaries }}
+        TARGET: ${{ inputs.target }}
+        LABEL: ${{ inputs.label }}
+        VERSION: ${{ inputs.version }}
+        EXTRA_FILES: ${{ inputs.extra-files }}
+      run: |
+        set -euo pipefail
+
+        version="${VERSION:-${GITHUB_REF_NAME#v}}"
+        label="${LABEL:-${TARGET}}"
+        if [ -z "${label}" ]; then
+          echo "::error::Set 'label' when building without a target — the archive name needs a platform suffix"
+          exit 1
+        fi
+
+        # A cross-compiled build lands under the triple; a native one does not.
+        if [ -n "${TARGET}" ]; then
+          release_dir="target/${TARGET}/release"
+        else
+          release_dir="target/release"
+        fi
+
+        staging="$(mktemp -d)"
+
+        # Unquoted on purpose: splits the list on whitespace, including newlines.
+        # shellcheck disable=SC2206
+        for binary in ${BINARIES}; do
+          if [ ! -f "${release_dir}/${binary}" ]; then
+            echo "::error::Missing binary: ${release_dir}/${binary}"
+            exit 1
+          fi
+          cp "${release_dir}/${binary}" "${staging}/"
+        done
+
+        # Strict on purpose: a release that silently ships without a bundled
+        # component still reports success.
+        # shellcheck disable=SC2206
+        for extra in ${EXTRA_FILES}; do
+          if [ ! -f "${extra}" ]; then
+            echo "::error::Missing extra file: ${extra}"
+            exit 1
+          fi
+          cp "${extra}" "${staging}/"
+        done
+
+        archive="${ARCHIVE_NAME}-${version}-${label}.tar.gz"
+        tar czf "${archive}" -C "${staging}" .
+        rm -rf "${staging}"
+
+        echo "archive=${archive}" >> "$GITHUB_OUTPUT"
+        echo "ARCHIVE=${archive}" >> "$GITHUB_ENV"
+        echo "Packaged ${archive}"
