@@ -54,6 +54,7 @@ steps:
 | [`build-wasm`](build-wasm) | Build for wasm32, generate JS bindings, and optionally optimize. |
 | [`github-release`](github-release) | Generate a changelog with git-cliff and publish a GitHub release. |
 | [`r2-upload`](r2-upload) | Upload files to a Cloudflare R2 bucket with a pinned wrangler. |
+| [`apt-publish`](apt-publish) | Add debs to the apt repository in R2 by editing its catalog in place. |
 
 ## Versioning
 
