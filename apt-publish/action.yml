@@ -81,6 +81,27 @@ runs:
           echo "${key}: $(grep -c '^Package:' "repo/${key}" || true) entries"
         done
 
+        # The pool is the source of truth for what the catalog may list. wrangler
+        # cannot list objects, so this pages through the REST API. An empty or
+        # failed listing stops the publish for the same reason as a failed read.
+        : > repo/pool.list
+        cursor=""
+        while :; do
+          page="$(curl -fsS -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
+            "https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/r2/buckets/${BUCKET}/objects?prefix=pool/${COMPONENT}/&per_page=1000&cursor=${cursor}")"
+          echo "${page}" | jq -e '.success' > /dev/null
+          echo "${page}" | jq -r '.result[].key' >> repo/pool.list
+          if [ "$(echo "${page}" | jq -r '.result_info.is_truncated')" != "true" ]; then
+            break
+          fi
+          cursor="$(echo "${page}" | jq -r '.result_info.cursor')"
+        done
+        if [ ! -s repo/pool.list ]; then
+          echo "::error::The pool listing came back empty"
+          exit 1
+        fi
+        echo "pool: $(wc -l < repo/pool.list) objects"
+
     - name: Merge the debs into the catalog
       shell: bash
       env:
@@ -113,7 +134,7 @@ runs:
         for arch in ${ARCHITECTURES}; do
           index="dists/${SUITE}/${COMPONENT}/binary-${arch}/Packages"
           dpkg-scanpackages --multiversion --arch "${arch}" pool/ > "${index}.new"
-          python3 "${MERGE}" "${index}" "${index}.new" > "${index}.merged"
+          python3 "${MERGE}" "${index}" "${index}.new" pool.list > "${index}.merged"
           mv "${index}.merged" "${index}"
           rm "${index}.new"
           gzip -kf "${index}"
