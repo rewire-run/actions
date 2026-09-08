@@ -1,0 +1,204 @@
+name: apt publish
+description: Add debs to an apt repository in R2 by editing its catalog in place.
+
+inputs:
+  debs:
+    description: >-
+      Debs to publish, as a newline- or space-separated list of paths or globs.
+      Fails when nothing matches.
+    required: true
+  bucket:
+    description: R2 bucket holding the repository.
+    required: false
+    default: rewire-apt
+  suite:
+    description: Suite under `dists/`.
+    required: false
+    default: stable
+  component:
+    description: Component under `pool/` and `dists/<suite>/`.
+    required: false
+    default: main
+  architectures:
+    description: Space-separated architectures whose indexes are maintained.
+    required: false
+    default: amd64 arm64
+  gpg-private-key:
+    description: Base64-encoded private key that signs the Release file.
+    required: true
+  gpg-uid:
+    description: User ID of the signing key, also exported as the public key.
+    required: false
+    default: apt@rewire.run
+  api-token:
+    description: Cloudflare API token with read and write access to the bucket.
+    required: true
+  account-id:
+    description: Cloudflare account ID that owns the bucket.
+    required: true
+  wrangler-version:
+    description: wrangler version to install. Defaults to the pinned major.
+    required: false
+    default: "4"
+
+runs:
+  using: composite
+  steps:
+    - name: Install tools
+      shell: bash
+      env:
+        WRANGLER_VERSION: ${{ inputs.wrangler-version }}
+      run: |
+        sudo apt-get update -qq
+        sudo apt-get install -y -qq --no-install-recommends apt-utils dpkg-dev
+        npm install -g "wrangler@${WRANGLER_VERSION}"
+
+    - name: Import the signing key
+      shell: bash
+      env:
+        GPG_PRIVATE_KEY: ${{ inputs.gpg-private-key }}
+      run: echo "${GPG_PRIVATE_KEY}" | base64 -d | gpg --batch --import
+
+    - name: Fetch the catalog
+      shell: bash
+      env:
+        BUCKET: ${{ inputs.bucket }}
+        SUITE: ${{ inputs.suite }}
+        COMPONENT: ${{ inputs.component }}
+        ARCHITECTURES: ${{ inputs.architectures }}
+        CLOUDFLARE_API_TOKEN: ${{ inputs.api-token }}
+        CLOUDFLARE_ACCOUNT_ID: ${{ inputs.account-id }}
+      # Any failure here stops the publish. Treating a failed read as an empty
+      # catalog would upload an index listing only the new debs and hide every
+      # package already in the repository. A brand-new bucket needs empty
+      # Packages objects seeded by hand.
+      run: |
+        set -euo pipefail
+        for arch in ${ARCHITECTURES}; do
+          key="dists/${SUITE}/${COMPONENT}/binary-${arch}/Packages"
+          mkdir -p "repo/$(dirname "${key}")"
+          wrangler r2 object get "${BUCKET}/${key}" --file "repo/${key}" --remote
+          echo "${key}: $(grep -c '^Package:' "repo/${key}" || true) entries"
+        done
+
+    - name: Merge the debs into the catalog
+      shell: bash
+      env:
+        DEBS: ${{ inputs.debs }}
+        SUITE: ${{ inputs.suite }}
+        COMPONENT: ${{ inputs.component }}
+        ARCHITECTURES: ${{ inputs.architectures }}
+        MERGE: ${{ github.action_path }}/merge.py
+      run: |
+        set -euo pipefail
+        shopt -s nullglob
+
+        # shellcheck disable=SC2206
+        matched=(${DEBS})
+        if [ ${#matched[@]} -eq 0 ]; then
+          echo "::error::No debs matched: ${DEBS}"
+          exit 1
+        fi
+
+        mkdir -p "repo/pool/${COMPONENT}"
+        for deb in "${matched[@]}"; do
+          if [ ! -f "${deb}" ]; then
+            echo "::error::File not found: ${deb}"
+            exit 1
+          fi
+          cp "${deb}" "repo/pool/${COMPONENT}/"
+        done
+
+        cd repo
+        for arch in ${ARCHITECTURES}; do
+          index="dists/${SUITE}/${COMPONENT}/binary-${arch}/Packages"
+          dpkg-scanpackages --multiversion --arch "${arch}" pool/ > "${index}.new"
+          python3 "${MERGE}" "${index}" "${index}.new" > "${index}.merged"
+          mv "${index}.merged" "${index}"
+          rm "${index}.new"
+          gzip -kf "${index}"
+          echo "${index}: $(grep -c '^Package:' "${index}") entries"
+        done
+
+    - name: Sign the release
+      shell: bash
+      env:
+        SUITE: ${{ inputs.suite }}
+        COMPONENT: ${{ inputs.component }}
+        ARCHITECTURES: ${{ inputs.architectures }}
+        GPG_UID: ${{ inputs.gpg-uid }}
+      run: |
+        set -euo pipefail
+        cd "repo/dists/${SUITE}"
+        apt-ftparchive release \
+          -o APT::FTPArchive::Release::Origin="rewire" \
+          -o APT::FTPArchive::Release::Label="rewire" \
+          -o APT::FTPArchive::Release::Suite="${SUITE}" \
+          -o APT::FTPArchive::Release::Codename="${SUITE}" \
+          -o APT::FTPArchive::Release::Architectures="${ARCHITECTURES}" \
+          -o APT::FTPArchive::Release::Components="${COMPONENT}" \
+          . > Release
+        gpg --batch --yes --armor --detach-sign -o Release.gpg Release
+        gpg --batch --yes --clearsign -o InRelease Release
+        cd ../..
+        gpg --export "${GPG_UID}" > key.gpg
+        gpg --armor --export "${GPG_UID}" > key.asc
+
+    - name: Upload
+      shell: bash
+      working-directory: repo
+      env:
+        BUCKET: ${{ inputs.bucket }}
+        SUITE: ${{ inputs.suite }}
+        COMPONENT: ${{ inputs.component }}
+        ARCHITECTURES: ${{ inputs.architectures }}
+        CLOUDFLARE_API_TOKEN: ${{ inputs.api-token }}
+        CLOUDFLARE_ACCOUNT_ID: ${{ inputs.account-id }}
+      # Debs first, so a catalog is never uploaded ahead of the files it lists.
+      run: |
+        set -euo pipefail
+        upload() {
+          local file="$1" content_type="$2" cache="$3"
+          echo "uploading ${file}"
+          wrangler r2 object put "${BUCKET}/${file}" --file "${file}" --remote \
+            --content-type "${content_type}" --cache-control "${cache}"
+        }
+
+        for deb in "pool/${COMPONENT}"/*.deb; do
+          upload "${deb}" "application/vnd.debian.binary-package" "max-age=31536000"
+        done
+        for arch in ${ARCHITECTURES}; do
+          index="dists/${SUITE}/${COMPONENT}/binary-${arch}/Packages"
+          upload "${index}" "text/plain" "no-cache, max-age=300"
+          upload "${index}.gz" "application/gzip" "no-cache, max-age=300"
+        done
+        upload "dists/${SUITE}/Release" "text/plain" "no-cache, max-age=300"
+        upload "dists/${SUITE}/Release.gpg" "text/plain" "no-cache, max-age=300"
+        upload "dists/${SUITE}/InRelease" "text/plain" "no-cache, max-age=300"
+        upload key.gpg "application/pgp-keys" "max-age=86400"
+        upload key.asc "application/pgp-keys" "max-age=86400"
+
+    - name: Verify the catalog lists every deb
+      shell: bash
+      working-directory: repo
+      env:
+        BUCKET: ${{ inputs.bucket }}
+        SUITE: ${{ inputs.suite }}
+        COMPONENT: ${{ inputs.component }}
+        ARCHITECTURES: ${{ inputs.architectures }}
+        CLOUDFLARE_API_TOKEN: ${{ inputs.api-token }}
+        CLOUDFLARE_ACCOUNT_ID: ${{ inputs.account-id }}
+      run: |
+        set -euo pipefail
+        for arch in ${ARCHITECTURES}; do
+          key="dists/${SUITE}/${COMPONENT}/binary-${arch}/Packages"
+          wrangler r2 object get "${BUCKET}/${key}" --pipe --remote > published
+          for deb in "pool/${COMPONENT}"/*_all.deb "pool/${COMPONENT}"/*_"${arch}".deb; do
+            [ -f "${deb}" ] || continue
+            if ! grep -qx "Filename: ${deb}" published; then
+              echo "::error::${deb} is missing from ${key} after publishing"
+              exit 1
+            fi
+            echo "${arch}: ${deb} listed"
+          done
+        done
