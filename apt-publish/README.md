@@ -48,8 +48,8 @@ rebuilt deb gets its new checksum instead of a duplicate line.
 
 - Two publishers running at the same moment race on the read-modify-write, and one loses its entries. Re-run the
   loser, which is idempotent.
-- The catalog is never rebuilt from scratch, so a deb removed from the pool by hand stays listed until something
-  publishes again.
+- A deb deleted from the pool by hand stays listed until the next publish, which drops every entry whose file is
+  no longer in the pool. Deleting is therefore a two-step affair: remove the objects, then publish anything.
 - The catalog must already exist in the bucket. A failed read stops the publish rather than being treated as an
   empty catalog, because uploading an index with only the new debs would hide every package already published.
   Seed a new bucket with empty `Packages` objects by hand.
@@ -78,8 +78,10 @@ None.
 - Installs `apt-utils`, `dpkg-dev` and a pinned wrangler, and imports the signing key.
 - Fetches `dists/<suite>/<component>/binary-<arch>/Packages` for each architecture with `wrangler r2 object get`,
   not through the public hostname, which rejects GitHub's runners.
+- Lists the pool through the Cloudflare REST API, since wrangler cannot list objects, and fails on an empty or
+  failed listing.
 - Runs `dpkg-scanpackages` over the new debs only and merges the result into each index with `merge.py`, which
-  keeps every existing stanza whose `Filename` is not being republished.
+  keeps every existing stanza whose `Filename` is not being republished and still exists in the pool.
 - Regenerates `Packages.gz`, `Release`, `Release.gpg` and `InRelease`, exports the public key, and uploads debs
   before indexes so the catalog never points at a file that is not there yet.
 - Reads each index back from the bucket and fails if a published deb is not listed.
